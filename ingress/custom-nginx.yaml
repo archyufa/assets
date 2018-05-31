@@ -1,0 +1,157 @@
+---
+# Source: ingress/templates/nginx-custom-configuration.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-custom-configuration
+data:
+  enable-underscores-in-headers: "true"
+---
+# Source: ingress/templates/service-error.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    release_group: ingress
+    application: ingress
+    component: error-pages
+  name: ingress-error-pages
+spec:
+  clusterIP: None
+  ports:
+  - port: 80
+    protocol: TCP
+    targetPort: 8080
+  selector:
+    release_group: ingress
+    application: ingress
+    component: error-pages
+---
+# Source: ingress/templates/service-ingress.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: ingress-api
+  name: openstack
+spec:
+  ports:
+  - name: http
+    port: 80
+    protocol: TCP
+    targetPort: 80
+  - name: https
+    port: 443
+    protocol: TCP
+    targetPort: 443
+  selector:
+    app: ingress-api
+---
+# Source: ingress/templates/deployment-ingress.yaml
+apiVersion: extensions/v1beta1
+kind: DaemonSet
+metadata:
+  name: ingress-api
+spec:
+  template:
+    metadata:
+      labels:
+        release_group: ingress
+        application: ingress
+        component: api
+        app: ingress-api
+    spec:
+      hostNetwork: true
+      dnsPolicy: "ClusterFirstWithHostNet"
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: ingress-api
+          image: gcr.io/google_containers/nginx-ingress-controller:0.9.0-beta.8
+          imagePullPolicy: IfNotPresent
+
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 10254
+              scheme: HTTP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 10254
+              scheme: HTTP
+            initialDelaySeconds: 10
+            timeoutSeconds: 1
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - containerPort: 80
+              hostPort: 80
+            - containerPort: 443
+              hostPort: 443
+          args:
+            - /nginx-ingress-controller
+            - '--default-backend-service=$(POD_NAMESPACE)/ingress-error-pages'
+            - --configmap=$(POD_NAMESPACE)/nginx-custom-configuration
+---
+# Source: ingress/templates/deployment-error.yaml
+apiVersion: apps/v1beta1
+kind: Deployment
+metadata:
+  name: ingress-error-pages
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 3
+  template:
+    metadata:
+      labels:
+        release_group: ingress
+        application: ingress
+        component: error-pages
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: release_group
+                  operator: In
+                  values:
+                    - ingress
+                - key: application
+                  operator: In
+                  values:
+                    - ingress
+                - key: component
+                  operator: In
+                  values:
+                    - error-pages
+              topologyKey: kubernetes.io/hostname
+            weight: 10
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: ingress-error-pages
+          image: gcr.io/google_containers/defaultbackend:1.0
+          imagePullPolicy: IfNotPresent
+
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+              scheme: HTTP
+            initialDelaySeconds: 30
+            timeoutSeconds: 5
+          ports:
+            - containerPort: 8080
